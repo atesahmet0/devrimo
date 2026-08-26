@@ -8,6 +8,8 @@ const items = [
   { href: "/duyurular", label: "Duyurular" },
   { href: "/takvim", label: "Takvim" },
   { href: "/mail", label: "Mail" },
+  { href: "/onboarding", label: "Onboarding" },
+  { href: "/ayarlar", label: "Ayarlar" },
 ];
 
 export function MainNav() {

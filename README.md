@@ -152,6 +152,21 @@ saatlerinin görünmemesi sorununa karşı).
 - Web: `/takvim` sayfasında çakışma varsa sarı, düz stil uyarı bandı.
 - Chat örneği: "programımda çakışma var mı?"
 
+## Onboarding / Ayarlar (Faz 7)
+
+Üç kaynak için bağlantı: **Email (IMAP)** · **ODTÜClass** · **METU SAIS** (`https://student.metu.edu.tr/portal/#/`).
+
+- **SAIS connector** `packages/connectors/sais.py` — `httpx` + form-login, `SAIS_USERNAME` / `SAIS_PASSWORD` (boşsa stub fallback, demo kırılmaz). Fonksiyonlar: `get_student_info`, `get_schedule`, `get_transcript`, `get_announcements`.
+- **Credential saklama:** onboarding'den girilenler SQLite `credentials` tablosuna yazılır, env'yi override eder (kalıcı, restart sonrası da kalır). `GET /api/connections` sadece `username_masked` döner, şifre asla dönülmez.
+- **Agent API:** `GET /api/connections` (masked), `POST /api/connections` (kaydet + test), `POST /api/connections/test` (sadece test), `DELETE /api/connections/{service}`, `GET /healthz` → `{sais: bool}`.
+- **Chat:** SAIS tool'ları `get_sais_info`, `get_sais_schedule`, `get_sais_transcript` (stub modunda da çalışır). `get_today_schedule` önceliği SAIS → ODTÜClass → stub.
+- **Web:** `/onboarding` 3 adımlı wizard (Test + Kaydet + Atla her adımda, neutral shadcn + lucide), `/ayarlar` üç kartlı yönetim sayfası (Test / Kaydet / Bağlantıyı Kes). Nav'da `Onboarding` ve `Ayarlar` linkleri.
+
+```sh
+SAIS_USERNAME=eXXXXXXX
+SAIS_PASSWORD=...
+```
+
 ## Yol haritası
 
 Supabase auth, takvim connector'ı, webmail gönderme (güvenlik onayı
