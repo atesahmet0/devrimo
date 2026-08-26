@@ -129,6 +129,29 @@ MAIL_PASSWORD=...
   connector açıklayıcı hata döner; ASCII sorgularda sunucu tarafında
   CHARSET denenir, reddedilirse düz SEARCH ile devam edilir.
 
+## Günlük özet + ders çakışması uyarısı (Faz 6)
+
+r/ODTU'daki iki yaygın şikâyetin ürünleşmesi:
+
+**Günlük duyuru özeti.** Agent, ODTÜClass duyuruları + izlenen sayfa
+değişiklikleri + okunmamış mailleri tek ham akışta birleştirir
+(`get_daily_digest` tool'u) ve LLM kısa Türkçe özete çevirir.
+
+- Web: `/duyurular` sayfasındaki **"Günlük Özet"** kartı agent'in
+  `GET /api/digest` (LLM özetli) ucundan okur; agent kapalıysa kart
+  hiç gösterilmez.
+- Chat örnekleri: "bugün ne kaçırabilirim?", "günün özeti".
+
+**Ders çakışma tespiti.** `packages/connectors/conflicts.py`,
+`detect_conflicts(schedule)` ile aynı gün/saat diliminde kesişen dersleri
+bulur: farklı iki ders kesişiyorsa `cakisma`, aynı ders kodunun lab saati
+kesişiyorsa uyarı değil bilgi olarak `lab_bilgi` işaretlenir (portalda lab
+saatlerinin görünmemesi sorununa karşı).
+
+- Agent: `check_schedule_conflicts` tool'u ve `GET /api/conflicts` route'u.
+- Web: `/takvim` sayfasında çakışma varsa sarı, düz stil uyarı bandı.
+- Chat örneği: "programımda çakışma var mı?"
+
 ## Yol haritası
 
 Supabase auth, takvim connector'ı, webmail gönderme (güvenlik onayı
