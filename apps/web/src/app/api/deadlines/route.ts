@@ -1,0 +1,18 @@
+const AGENT_URL = process.env.AGENT_URL ?? "http://localhost:8300";
+
+export async function GET(req: Request) {
+  const days = new URL(req.url).searchParams.get("days") ?? "7";
+  try {
+    const res = await fetch(
+      `${AGENT_URL}/api/deadlines?days=${encodeURIComponent(days)}`,
+      { cache: "no-store" }
+    );
+    const data = await res.json();
+    return Response.json(data, { status: res.status });
+  } catch {
+    return Response.json(
+      { error: "Agent'a ulaşılamıyor. Agent çalışıyor mu? (port 8300)" },
+      { status: 502 }
+    );
+  }
+}

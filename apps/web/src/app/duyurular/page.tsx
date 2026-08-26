@@ -7,6 +7,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
+import { WatchedUpdates } from "@/components/watched-updates";
 import { announcements } from "@/lib/stub-data";
 
 export default function DuyurularPage() {
@@ -19,6 +20,7 @@ export default function DuyurularPage() {
         </p>
       </div>
       <Separator />
+      <WatchedUpdates />
       <div className="space-y-4">
         {announcements.map((a) => (
           <Card key={a.id}>

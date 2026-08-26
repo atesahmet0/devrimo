@@ -6,6 +6,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
+import { UpcomingDeadlines } from "@/components/upcoming-deadlines";
 import { schedule } from "@/lib/stub-data";
 
 const days = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma"];
@@ -20,6 +21,10 @@ export default function TakvimPage() {
         </p>
       </div>
       <Separator />
+      <UpcomingDeadlines />
+      <p className="text-sm font-medium text-muted-foreground">
+        Haftalık ders programı
+      </p>
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {days.map((day) => {
           const slots = schedule.filter((s) => s.day === day);
