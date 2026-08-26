@@ -5,8 +5,10 @@ loop'u çalıştırır, sohbet geçmişini SQLite'ta tutar. Tek demo kullanıcı
 auth yok.
 
 Araç verisi: ODTUCLASS_URL / ODTU_USERNAME / ODTU_PASSWORD doluysa gerçek
-ODTÜClass connector'ü kullanılır; boşsa demo stub'ına düşer. Ayrıca arka
-planda watcher thread'i metu sayfalarını izler ve deadline uyarısı üretir
+ODTÜClass connector'ü kullanılır; boşsa demo stub'ına düşer. Webmail için
+MAIL_USERNAME / MAIL_PASSWORD doluysa IMAP üzerinden salt-okunur okuma/
+arama yapılır; boşsa yine demo stub döner. Ayrıca arka planda watcher
+thread'i metu sayfalarını izler ve deadline uyarısı üretir
 (bkz. watcher.py).
 """
 
@@ -28,7 +30,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from packages.connectors import deadlines, odtuclass, page_watcher  # noqa: E402
+from packages.connectors import deadlines, odtuclass, page_watcher, webmail  # noqa: E402
 
 import watcher  # noqa: E402
 
@@ -47,7 +49,9 @@ SYSTEM_PROMPT = (
     "gerçek ODTÜClass'tan mı yoksa demo stub'dan mı geldiğini belirtir; kaynağa göre konuş. "
     "'Yaklaşan ödev/deadline', 'yenilik/bildirim var mı' gibi sorularda get_deadlines, "
     "check_updates ve get_notifications araçlarını kullan; izleyici arka planda metu.edu.tr "
-    "sayfalarını tarar."
+    "sayfalarını tarar. 'Okunmamış maillerim', 'mailim var mı', 'maillerde ... ara' gibi "
+    "sorularda get_unread_mails ve search_emails araçlarını kullan; METU webmail salt-okunur "
+    "erişilir, mail gönderme yok."
 )
 
 TOOLS = [
@@ -133,6 +137,33 @@ TOOLS = [
             "name": "get_notifications",
             "description": "Okunmamış bildirimleri (sayfa değişikliği + yaklaşan deadline uyarıları) döndürür ve okundu işaretler.",
             "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_unread_mails",
+            "description": "METU webmail'deki okunmamış mailleri döndürür (salt-okunur).",
+            "parameters": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "description": "Kaç mail dönsün (varsayılan 20)."}},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_emails",
+            "description": "Maillerde Gönderen/Konu/Gövde araması yapar (salt-okunur).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Anahtar kelime, ör. 'ödev', 'kayıt' veya bir ders kodu."},
+                    "limit": {"type": "integer", "description": "Kaç sonuç dönsün (varsayılan 10)."},
+                },
+                "required": ["query"],
+            },
         },
     },
 ]
@@ -271,6 +302,26 @@ def _live_with_cache(key: str, fetch) -> dict:
         return out
 
 
+def _mail_with_cache(key: str, fetch) -> dict:
+    """IMAP çekimi → cache'e yaz; hata olursa Türkçe mesaj + varsa son bilinen mailler."""
+    out: dict = {"kaynak": "webmail"}
+    try:
+        data = fetch()
+        with closing(db()) as conn:
+            with conn:
+                cache_write(conn, key, data)
+        out["veriler"] = data
+        return out
+    except webmail.WebmailError as e:
+        out["hata"] = str(e)
+        with closing(db()) as conn:
+            cached = cache_read(conn, key)
+        if cached:
+            out["veriler"], out["son_guncelleme"] = cached
+            out["not"] = "Canlı çekim başarısız; son bilinen mailler gösteriliyor."
+        return out
+
+
 async def llm_chat(messages: list[dict]) -> dict:
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post(
@@ -400,6 +451,24 @@ def tool_get_notifications(_args: dict) -> dict:
     }
 
 
+def tool_get_unread_mails(args: dict) -> dict:
+    limit = max(1, min(50, int((args or {}).get("limit") or 20)))
+    if not webmail.is_configured():
+        return {"kaynak": "demo-stub", "veriler": webmail.list_unread(limit=limit)}
+    return _mail_with_cache("webmail:unread", lambda: webmail.list_unread(limit=limit))
+
+
+def tool_search_emails(args: dict) -> dict:
+    query = str((args or {}).get("query") or "").strip()
+    limit = max(1, min(50, int((args or {}).get("limit") or 10)))
+    if not query:
+        return {"hata": "Arama için bir anahtar kelime gerekli."}
+    if not webmail.is_configured():
+        return {"kaynak": "demo-stub", "veriler": webmail.search_mail(query, limit=limit)}
+    return _mail_with_cache(f"webmail:search:{_norm(query)}",
+                            lambda: webmail.search_mail(query, limit=limit))
+
+
 TOOL_IMPLS = {
     "get_courses": tool_get_courses,
     "get_announcements": tool_get_announcements,
@@ -409,6 +478,8 @@ TOOL_IMPLS = {
     "check_updates": tool_check_updates,
     "get_deadlines": tool_get_deadlines,
     "get_notifications": tool_get_notifications,
+    "get_unread_mails": tool_get_unread_mails,
+    "search_emails": tool_search_emails,
 }
 
 
@@ -480,6 +551,7 @@ class ChatResponse(BaseModel):
 @app.get("/healthz")
 def healthz():
     return {"status": "ok", "odtuclass": odtuclass.is_configured(),
+            "webmail": webmail.is_configured(),
             "watcher": watcher.status()}
 
 
@@ -502,3 +574,8 @@ def api_deadlines(days: int = 7):
 @app.get("/api/notifications")
 def api_notifications():
     return tool_get_notifications({})
+
+
+@app.get("/api/mails")
+def api_mails(limit: int = 20):
+    return tool_get_unread_mails({"limit": limit})
