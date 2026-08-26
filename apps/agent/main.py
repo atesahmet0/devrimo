@@ -5,7 +5,9 @@ loop'u çalıştırır, sohbet geçmişini SQLite'ta tutar. Tek demo kullanıcı
 auth yok.
 
 Araç verisi: ODTUCLASS_URL / ODTU_USERNAME / ODTU_PASSWORD doluysa gerçek
-ODTÜClass connector'ü kullanılır; boşsa demo stub'ına düşer.
+ODTÜClass connector'ü kullanılır; boşsa demo stub'ına düşer. Ayrıca arka
+planda watcher thread'i metu sayfalarını izler ve deadline uyarısı üretir
+(bkz. watcher.py).
 """
 
 import asyncio
@@ -14,7 +16,8 @@ import os
 import sqlite3
 import sys
 import time
-from contextlib import closing
+from contextlib import asynccontextmanager, closing
+from datetime import date, timedelta
 from pathlib import Path
 
 import httpx
@@ -25,13 +28,15 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from packages.connectors import odtuclass  # noqa: E402
+from packages.connectors import deadlines, odtuclass, page_watcher  # noqa: E402
+
+import watcher  # noqa: E402
 
 BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 API_KEY = os.environ.get("OPENAI_API_KEY", "")
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
-DB_PATH = Path(__file__).parent / "data" / "devrimo.db"
+DB_PATH = Path(os.environ.get("DEVROMO_DB_PATH") or Path(__file__).parent / "data" / "devrimo.db")
 MAX_TOOL_ROUNDS = 5
 HISTORY_LIMIT = 20
 
@@ -39,7 +44,10 @@ SYSTEM_PROMPT = (
     "Sen Devrimo'sun: ODTÜ öğrencileri için bir asistan. Kısa ve net Türkçe cevap ver. "
     "Dersler, duyurular, ödevler, notlar veya ders programıyla ilgili sorularda elindeki "
     "araçları kullan; bilmediğini uydurma. Araç cevaplarında 'kaynak' alanı verinin "
-    "gerçek ODTÜClass'tan mı yoksa demo stub'dan mı geldiğini belirtir; kaynağa göre konuş."
+    "gerçek ODTÜClass'tan mı yoksa demo stub'dan mı geldiğini belirtir; kaynağa göre konuş. "
+    "'Yaklaşan ödev/deadline', 'yenilik/bildirim var mı' gibi sorularda get_deadlines, "
+    "check_updates ve get_notifications araçlarını kullan; izleyici arka planda metu.edu.tr "
+    "sayfalarını tarar."
 )
 
 TOOLS = [
@@ -95,6 +103,38 @@ TOOLS = [
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_updates",
+            "description": "İzlenen metu.edu.tr sayfalarında (OIDB, CENG, registrar) izleyicinin yakaladığı son değişiklikleri döndürür.",
+            "parameters": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "description": "Kaç kayıt dönsün (varsayılan 10)."}},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_deadlines",
+            "description": "Yaklaşan ödev/teslim deadline'larını gün penceresiyle süzer ve kalan günle döndürür.",
+            "parameters": {
+                "type": "object",
+                "properties": {"days": {"type": "integer", "description": "Pencere kaç gün? Varsayılan 7."}},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_notifications",
+            "description": "Okunmamış bildirimleri (sayfa değişikliği + yaklaşan deadline uyarıları) döndürür ve okundu işaretler.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
 ]
 
 ANNOUNCEMENTS = [
@@ -121,10 +161,14 @@ STUB_COURSES = [
     {"id": "stat201", "kod": "STAT 201", "ad": "İstatistik"},
 ]
 
+def _in_days(n: int) -> str:
+    return (date.today() + timedelta(days=n)).strftime("%Y-%m-%d")
+
+
 STUB_ASSIGNMENTS = [
-    {"course": "CENG 242", "ad": "Ödev 3", "teslim": "2026-09-04", "aciklama": "Late policy: her gün %10."},
-    {"course": "MATH 260", "ad": "Problem seti 5", "teslim": "2026-09-08", "aciklama": ""},
-    {"course": "PHYS 106", "ad": "Lab raporu 1", "teslim": "2026-09-11", "aciklama": ""},
+    {"course": "CENG 242", "ad": "Ödev 3", "teslim": _in_days(9), "aciklama": "Late policy: her gün %10."},
+    {"course": "MATH 260", "ad": "Problem seti 5", "teslim": _in_days(13), "aciklama": ""},
+    {"course": "PHYS 106", "ad": "Lab raporu 1", "teslim": _in_days(3), "aciklama": ""},
 ]
 
 
@@ -156,6 +200,8 @@ def db() -> sqlite3.Connection:
                payload TEXT NOT NULL,
                fetched_at TEXT NOT NULL DEFAULT (datetime('now')))"""
     )
+    page_watcher.ensure_tables(conn)
+    watcher.ensure_tables(conn)
     return conn
 
 
@@ -298,12 +344,71 @@ def tool_get_today_schedule(args: dict) -> dict:
     return out
 
 
+def tool_check_updates(args: dict) -> dict:
+    limit = max(1, min(50, int((args or {}).get("limit") or 10)))
+    with closing(db()) as conn:
+        rows = conn.execute(
+            "SELECT c.url, COALESCE(w.etiket, ''), c.eski_hash, c.yeni_hash, "
+            "c.ozet, c.created_at FROM page_changes c "
+            "LEFT JOIN watched_pages w ON w.url = c.url ORDER BY c.id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        watches = page_watcher.list_watches(conn)
+    return {
+        "kaynak": "izleyici",
+        "izlenen_sayfa": len(watches),
+        "veriler": [
+            {"url": u, "etiket": e, "ozet": o, "tarih": t}
+            for u, e, _oh, _nh, o, t in rows
+        ],
+    }
+
+
+def tool_get_deadlines(args: dict) -> dict:
+    days = max(1, min(60, int((args or {}).get("days") or 7)))
+    src = tool_get_assignments({})
+    items = src.get("veriler") or []
+    out: dict = {"kaynak": src.get("kaynak"), "pencere_gun": days,
+                 "veriler": deadlines.filter_upcoming(items, days=days)}
+    if src.get("hata"):
+        out["uyari"] = f"Ödev verisi alınamadı ({src['hata']})."
+    return out
+
+
+def tool_get_notifications(_args: dict) -> dict:
+    with closing(db()) as conn:
+        rows = conn.execute(
+            "SELECT id, tur, baslik, detay, url, created_at FROM notifications "
+            "WHERE okundu = 0 ORDER BY id DESC LIMIT 20"
+        ).fetchall()
+        if rows:
+            ids = [r[0] for r in rows]
+            with conn:
+                conn.execute(
+                    f"UPDATE notifications SET okundu = 1 WHERE id IN "
+                    f"({', '.join('?' * len(ids))})",
+                    ids,
+                )
+        kalan = watcher.unread_count(conn)
+    return {
+        "kaynak": "bildirim",
+        "veriler": [
+            {"tur": t, "baslik": b, "detay": d, "url": u, "tarih": c}
+            for _i, t, b, d, u, c in rows
+        ],
+        "kalan_okunmamis": kalan,
+    }
+
+
 TOOL_IMPLS = {
     "get_courses": tool_get_courses,
     "get_announcements": tool_get_announcements,
     "get_assignments": tool_get_assignments,
     "get_grades": tool_get_grades,
     "get_today_schedule": tool_get_today_schedule,
+    "check_updates": tool_check_updates,
+    "get_deadlines": tool_get_deadlines,
+    "get_notifications": tool_get_notifications,
 }
 
 
@@ -351,7 +456,17 @@ async def chat_roundtrip(user_message: str) -> str:
         raise HTTPException(502, "Tool döngüsü sınırı aşıldı.")
 
 
-app = FastAPI(title="devrimo-agent")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    watcher.start(
+        db_factory=db,
+        assignments_provider=lambda: tool_get_assignments({}).get("veriler") or [],
+    )
+    yield
+    watcher.stop()
+
+
+app = FastAPI(title="devrimo-agent", lifespan=lifespan)
 
 
 class ChatRequest(BaseModel):
@@ -364,10 +479,26 @@ class ChatResponse(BaseModel):
 
 @app.get("/healthz")
 def healthz():
-    return {"status": "ok", "odtuclass": odtuclass.is_configured()}
+    return {"status": "ok", "odtuclass": odtuclass.is_configured(),
+            "watcher": watcher.status()}
 
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest) -> ChatResponse:
     reply = await chat_roundtrip(req.message)
     return ChatResponse(reply=reply)
+
+
+@app.get("/api/updates")
+def api_updates(limit: int = 15):
+    return tool_check_updates({"limit": limit})
+
+
+@app.get("/api/deadlines")
+def api_deadlines(days: int = 7):
+    return tool_get_deadlines({"days": days})
+
+
+@app.get("/api/notifications")
+def api_notifications():
+    return tool_get_notifications({})
