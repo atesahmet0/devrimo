@@ -98,7 +98,38 @@ SQLite `notifications` tablosuna yazılır (dedupe'lu, tekrar bildirilmez).
   `DEADLINE_WINDOW_DAYS` (varsayılan 7). Polite crawling: sayfa başına
   tek istek/döngü, timeout var, retry yok.
 
+## Webmail bağlama (Faz 5)
+
+`packages/connectors/webmail.py`, METU webmail'e (Roundcube, IMAP SSL)
+**salt-okunur** bağlanır: okunmamış mailler, Gönderen/Konu/Gövde araması,
+tam gövde. Mail gönderme/yanıtlama bu fazda yok; bağlantılar EXAMINE
+(readonly) ile açılır, mesaj bayrağı değişmez.
+
+```sh
+IMAP_HOST=mail.metu.edu.tr   # varsayılan
+IMAP_PORT=993                # varsayılan
+MAIL_USERNAME=eXXXXXXX
+MAIL_PASSWORD=...
+```
+
+- Credential boşken connector demo stub verisine düşer — `/mail` sayfası
+  ve chat kırılmaz.
+- Canlı moda geçiş: `.env` içine `MAIL_USERNAME` / `MAIL_PASSWORD` gir,
+  agent'ı yeniden başlat (`healthz` çıktısında `"webmail":true`).
+- Agent uçları: `get_unread_mails` / `search_emails` tool'ları ve
+  `GET /api/mails?limit=20` route'u. Sonuçlar SQLite `cache` tablosuna
+  yazılır; canlı çekim başarısız olursa son bilinen mailler gösterilir.
+- Web: `/mail` agent `/api/mails`'ten okur; agent kapalıysa yerel stub'a
+  düşer (kaynak rozetinden görünür).
+- Chat örnekleri: "okunmamış maillerim var mı?", "maillerde ödev ara".
+- Hatalar Türkçe ve ayrıktır: yanlış şifre → "Webmail girişi başarısız",
+  host/ağ sorunu → "Webmail sunucusuna ulaşılamıyor". Şifre hiçbir yere
+  loglanmaz, SQLite'a yazılmaz.
+- Türkçe karakterli arama için sunucu UTF-8 (RFC6855) desteklemiyorsa
+  connector açıklayıcı hata döner; ASCII sorgularda sunucu tarafında
+  CHARSET denenir, reddedilirse düz SEARCH ile devam edilir.
+
 ## Yol haritası
 
-Faz 3: takvim + webmail connector'ları, sayfa izleyici, Supabase auth.
-Karar kaydı: `docs/ARCHITECTURE.md`.
+Supabase auth, takvim connector'ı, webmail gönderme (güvenlik onayı
+sonrası). Karar kaydı: `docs/ARCHITECTURE.md`.
