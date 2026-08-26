@@ -79,6 +79,25 @@ ODTU_PASSWORD=...
 - Credential boşken her şey demo stub'ıyla çalışır — demo kırılmaz.
 - Şifre hiçbir yere loglanmaz, SQLite'a yazılmaz.
 
+## Sayfa izleyici + deadline uyarısı (Faz 4)
+
+Agent ile birlikte bir arka plan thread'i başlar (`apps/agent/watcher.py`):
+varsayılan izleme listesindeki metu.edu.tr sayfalarını (OIDB duyurular,
+CENG bölüm duyuruları, registrar) her döngüde hash-diff ile tarar ve
+ODTÜClass assignment'larından yaklaşan deadline'ları süzer. Yeni bulgu
+SQLite `notifications` tablosuna yazılır (dedupe'lu, tekrar bildirilmez).
+
+- `GET /healthz` çıktısındaki `"watcher"` alanı thread durumunu gösterir
+  (`canli`, `dongu`, `son_tarama`, `son_hata`, `aralik_dk`).
+- Agent uçları: `check_updates` / `get_deadlines` / `get_notifications`
+  tool'ları ve `GET /api/updates`, `GET /api/deadlines?days=7`,
+  `GET /api/notifications` route'ları.
+- Web: `/duyurular` "İzlenen Sayfa Değişiklikleri", `/takvim`
+  "Yaklaşan Deadline'lar" bölümü agent API'sinden okur.
+- Ayar (env): `WATCHER_INTERVAL_SECS` (varsayılan 900), 
+  `DEADLINE_WINDOW_DAYS` (varsayılan 7). Polite crawling: sayfa başına
+  tek istek/döngü, timeout var, retry yok.
+
 ## Yol haritası
 
 Faz 3: takvim + webmail connector'ları, sayfa izleyici, Supabase auth.
