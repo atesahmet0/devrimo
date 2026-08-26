@@ -1,0 +1,17 @@
+node_modules/
+.next/
+out/
+dist/
+
+# python / agent
+__pycache__/
+.venv/
+*.pyc
+apps/agent/data/
+
+# env & misc
+.env
+.env.*
+!.env.example
+.DS_Store
+*.log
