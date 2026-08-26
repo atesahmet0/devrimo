@@ -5,6 +5,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { ScheduleConflicts } from "@/components/schedule-conflicts";
 import { Separator } from "@/components/ui/separator";
 import { UpcomingDeadlines } from "@/components/upcoming-deadlines";
 import { schedule } from "@/lib/stub-data";
@@ -21,6 +22,7 @@ export default function TakvimPage() {
         </p>
       </div>
       <Separator />
+      <ScheduleConflicts />
       <UpcomingDeadlines />
       <p className="text-sm font-medium text-muted-foreground">
         Haftalık ders programı

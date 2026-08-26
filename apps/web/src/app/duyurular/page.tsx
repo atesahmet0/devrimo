@@ -6,6 +6,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { DailyDigest } from "@/components/daily-digest";
 import { Separator } from "@/components/ui/separator";
 import { WatchedUpdates } from "@/components/watched-updates";
 import { announcements } from "@/lib/stub-data";
@@ -20,6 +21,7 @@ export default function DuyurularPage() {
         </p>
       </div>
       <Separator />
+      <DailyDigest />
       <WatchedUpdates />
       <div className="space-y-4">
         {announcements.map((a) => (
