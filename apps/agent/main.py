@@ -23,12 +23,18 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import httpx
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+
+# Load .env from apps/agent/.env (and fall back to repo root .env), letting .env win over inherited env.
+for _p in (Path(__file__).resolve().parent / ".env", _REPO_ROOT / ".env"):
+    if _p.exists():
+        load_dotenv(_p, override=True)
 
 from packages.connectors import conflicts, deadlines, odtuclass, page_watcher, webmail  # noqa: E402
 
@@ -351,6 +357,15 @@ def _mail_with_cache(key: str, fetch) -> dict:
         return out
 
 
+def _llm_headers() -> dict:
+    h = {"Authorization": f"Bearer {API_KEY}"}
+    if "openrouter" in BASE_URL:
+        # OpenRouter önerir; yoksa da zararı yok
+        h["HTTP-Referer"] = os.environ.get("OPENROUTER_REFERER", "https://github.com/atesahmet0/devrimo")
+        h["X-Title"] = os.environ.get("OPENROUTER_TITLE", "Devrimo")
+    return h
+
+
 async def llm_chat(messages: list[dict], tools: list | None = TOOLS) -> dict:
     payload: dict = {"model": MODEL, "messages": messages}
     if tools:
@@ -358,11 +373,13 @@ async def llm_chat(messages: list[dict], tools: list | None = TOOLS) -> dict:
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post(
             f"{BASE_URL}/chat/completions",
-            headers={"Authorization": f"Bearer {API_KEY}"},
+            headers=_llm_headers(),
             json=payload,
         )
     if resp.status_code != 200:
-        raise HTTPException(502, f"LLM hatası {resp.status_code}: {resp.text[:300]}")
+        # Key'i asla loglama; host'u göster ki OpenRouter vs OpenAI karışmasın
+        host = BASE_URL
+        raise HTTPException(502, f"LLM hatası {resp.status_code} @ {host}: {resp.text[:300]}")
     return resp.json()
 
 
