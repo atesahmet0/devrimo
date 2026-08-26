@@ -30,7 +30,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from packages.connectors import deadlines, odtuclass, page_watcher, webmail  # noqa: E402
+from packages.connectors import conflicts, deadlines, odtuclass, page_watcher, webmail  # noqa: E402
 
 import watcher  # noqa: E402
 
@@ -51,7 +51,14 @@ SYSTEM_PROMPT = (
     "check_updates ve get_notifications araçlarını kullan; izleyici arka planda metu.edu.tr "
     "sayfalarını tarar. 'Okunmamış maillerim', 'mailim var mı', 'maillerde ... ara' gibi "
     "sorularda get_unread_mails ve search_emails araçlarını kullan; METU webmail salt-okunur "
-    "erişilir, mail gönderme yok."
+    "erişilir, mail gönderme yok. "
+    "'Bugün ne kaçırabilirim', 'günlük özet', 'günün özeti' gibi sorularda get_daily_digest "
+    "aracının döndürdüğü birleşik ham akışı (duyurular + sayfa değişiklikleri + okunmamış "
+    "mailler) en önemli öğeden başlayarak kısa Türkçe madde listesine çevir; her maddede "
+    "kaynağı köşeli parantezle belirt (örn. [CENG 242], [OIDB], [Mail]). "
+    "'Programımda çakışma var mı', 'derslerim çakışıyor mu' gibi sorularda "
+    "check_schedule_conflicts aracını kullan: tip'i 'cakisma' olanlar uyarıdır, "
+    "'lab_bilgi' olanlar aynı dersin lab saati olduğu için yalnızca bilgidir."
 )
 
 TOOLS = [
@@ -164,6 +171,28 @@ TOOLS = [
                 },
                 "required": ["query"],
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_daily_digest",
+            "description": "Duyurular + izlenen sayfa değişiklikleri + okunmamış mailleri tek ham metinde birleştirir; özetleme kullanıcıya kalmıştır.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "Bölüm başına kaç kayıt (varsayılan 5)."}
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_schedule_conflicts",
+            "description": "Haftalık ders programındaki saat çakışmalarını denetler: farklı dersler kesişiyorsa 'cakisma', aynı ders kodunun lab'ı kesişiyorsa 'lab_bilgi' döner.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
 ]
@@ -322,12 +351,15 @@ def _mail_with_cache(key: str, fetch) -> dict:
         return out
 
 
-async def llm_chat(messages: list[dict]) -> dict:
+async def llm_chat(messages: list[dict], tools: list | None = TOOLS) -> dict:
+    payload: dict = {"model": MODEL, "messages": messages}
+    if tools:
+        payload["tools"] = tools
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post(
             f"{BASE_URL}/chat/completions",
             headers={"Authorization": f"Bearer {API_KEY}"},
-            json={"model": MODEL, "messages": messages, "tools": TOOLS},
+            json=payload,
         )
     if resp.status_code != 200:
         raise HTTPException(502, f"LLM hatası {resp.status_code}: {resp.text[:300]}")
@@ -469,6 +501,92 @@ def tool_search_emails(args: dict) -> dict:
                             lambda: webmail.search_mail(query, limit=limit))
 
 
+def _weekly_schedule_slots() -> list[dict]:
+    """WEEKLY_SCHEDULE'ı detect_conflicts'un beklediği dict biçimine çevirir."""
+    return [
+        {"gun": gun, "baslangic": s, "bitis": e, "ders": ders, "yer": yer}
+        for gun, rows in WEEKLY_SCHEDULE.items()
+        for s, e, ders, yer in rows
+    ]
+
+
+def tool_check_schedule_conflicts(_args: dict) -> dict:
+    bulgular = conflicts.detect_conflicts(_weekly_schedule_slots())
+    out: dict = {
+        "kaynak": "haftalik-program",
+        "veriler": bulgular,
+        "ozet": (f"{len(bulgular)} çakışma bulundu." if bulgular
+                 else "Programda saat çakışması yok."),
+    }
+    if _get_odtu_client() is not None:
+        out["not"] = ("ODTÜClass'ta haftalık çizelge API'si olmadığı için "
+                      "kayıtlı haftalık program esas alındı.")
+    return out
+
+
+def _digest_section(lines: list[str], baslik: str, src: dict, render) -> None:
+    veriler = src.get("veriler") or []
+    lines.append(f"== {baslik} (kaynak: {src.get('kaynak', '?' )}, {len(veriler)} kayıt) ==")
+    if not veriler:
+        lines.append("(kayıt yok)")
+        return
+    if src.get("hata"):
+        lines.append(f"(veri alınamadı: {src['hata']})")
+        return
+    lines.extend(render(v) for v in veriler)
+
+
+def tool_get_daily_digest(args: dict) -> dict:
+    limit = max(1, min(20, int((args or {}).get("limit") or 5)))
+    ann = tool_get_announcements({})
+    upd = tool_check_updates({"limit": limit})
+    mail = tool_get_unread_mails({"limit": limit})
+
+    def ann_line(a):
+        title = a.get("baslik") or a.get("title") or ""
+        course = a.get("course")
+        tarih = a.get("tarih") or a.get("date") or a.get("due")
+        ozet = a.get("ozet") or ""
+        parts = [f"[{course}] {title}".strip()] if course else [title]
+        if tarih:
+            parts.append(f"({tarih})")
+        if ozet:
+            parts.append(f"— {str(ozet)[:120]}")
+        return "- " + " ".join(parts)
+
+    def upd_line(u):
+        label = u.get("etiket") or u.get("url") or ""
+        bits = [f"[{label}]"] if label else ["[sayfa]"]
+        if u.get("ozet"):
+            bits.append(str(u["ozet"])[:160])
+        if u.get("tarih"):
+            bits.append(f"({u['tarih']})")
+        return "- " + " ".join(bits)
+
+    def mail_line(m):
+        konu = m.get("konu") or ""
+        bits = [f"[Mail] {m.get('kimden', '')} — {konu}".strip()]
+        if m.get("tarih"):
+            bits.append(f"({m['tarih']})")
+        if m.get("ozet"):
+            bits.append(f"— {str(m['ozet'])[:120]}")
+        return "- " + " ".join(bits)
+
+    lines = [f"GÜNLÜK BİRLEŞİK AKIŞ — {date.today().isoformat()}"]
+    _digest_section(lines, "DUYURULAR", ann, ann_line)
+    _digest_section(lines, "İZLENEN SAYFA DEĞİŞİKLİKLERİ", upd, upd_line)
+    _digest_section(lines, "OKUNMAMIŞ MAILLER", mail, mail_line)
+
+    return {
+        "kaynak": "birlesik-akis",
+        "kaynaklar": [ann.get("kaynak"), upd.get("kaynak"), mail.get("kaynak")],
+        "adet": {"duyuru": len(ann.get("veriler") or []),
+                 "sayfa_degisikligi": len(upd.get("veriler") or []),
+                 "okunmamis_mail": len(mail.get("veriler") or [])},
+        "metin": "\n".join(lines),
+    }
+
+
 TOOL_IMPLS = {
     "get_courses": tool_get_courses,
     "get_announcements": tool_get_announcements,
@@ -480,6 +598,8 @@ TOOL_IMPLS = {
     "get_notifications": tool_get_notifications,
     "get_unread_mails": tool_get_unread_mails,
     "search_emails": tool_search_emails,
+    "get_daily_digest": tool_get_daily_digest,
+    "check_schedule_conflicts": tool_check_schedule_conflicts,
 }
 
 
@@ -579,3 +699,35 @@ def api_notifications():
 @app.get("/api/mails")
 def api_mails(limit: int = 20):
     return tool_get_unread_mails({"limit": limit})
+
+
+DIGEST_PROMPT = (
+    "Aşağıda bir ODTÜ öğrencisinin duyuruları, izlenen sayfa değişiklikleri ve "
+    "okunmamış maillerinin birleşik ham akışı var. Bugün kaçırabilecekleri açısından "
+    "en önemliden başlayarak kısa Türkçe madde listesi üret. En fazla 6 madde; her "
+    "maddenin sonunda kaynağı köşeli parantezle belirt ([CENG 242], [OIDB], [Mail] gibi). "
+    "Akış boşsa tek cümleyle 'Bugün için öne çıkan bir şey yok' de.\n\n"
+)
+
+
+@app.get("/api/digest")
+async def api_digest():
+    if not API_KEY:
+        raise HTTPException(503, "OPENAI_API_KEY ayarlanmamış; günlük özet üretilemez.")
+    raw = tool_get_daily_digest({})
+    metin = (raw.get("metin") or "").strip()
+    if not metin:
+        return {"ozet": "Bugün için öne çıkan bir duyuru, değişiklik veya okunmamış mail yok.",
+                "kaynaklar": [], "tarih": date.today().isoformat()}
+    data = await llm_chat(
+        [{"role": "system", "content": DIGEST_PROMPT}, {"role": "user", "content": metin}],
+        tools=None,
+    )
+    ozet = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+    return {"ozet": ozet.strip(), "kaynaklar": raw.get("kaynaklar"),
+            "adet": raw.get("adet"), "tarih": date.today().isoformat()}
+
+
+@app.get("/api/conflicts")
+def api_conflicts():
+    return tool_check_schedule_conflicts({})
